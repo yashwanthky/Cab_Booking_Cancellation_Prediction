@@ -27,7 +27,7 @@ Kaggle.com is an online platform, quite popular amongst the data science communi
 The project involved analyzing the ride information presented by YourCabs.com and ISB hosted via a Kaggle competition and building a classification model to predict a ride cancellation through cab unavailability (by the driver). The steps followed in building the process are as follows – 
 1.	EDA on the data to understand the values and feature engineering to create the required variables for modelling process
 2.	Creating a stratified sample (balanced) dataset and a SMOTE resampled dataset. Splitting the dataset into a train and test split (70-30) for modeling purpose
-3.	Model building and validation through key diagnostic measures. A range of modeling techniques were used including logistic regression (with and without automated variable selection), CART, Random Forest, SVM and Neural Nets
+3.	Model building and validation through key diagnostic measures. A range of modeling techniques were used including **logistic regression (with and without automated variable selection), CART, Random Forest, SVM and Neural Nets**
 
 The results of the various models built are presented in detail in the report. Random forest tuned for its hyper parameters performs the best on the testing data based on the misclassification rate (thought the FNR is higher than that of the SVM or Neural Network model). 
  
