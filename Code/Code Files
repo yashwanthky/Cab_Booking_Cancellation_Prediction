@@ -1,0 +1,4 @@
+The folder contains 2 versions of codes - 
+
+* One with all the models built using stratified sample of data
+* One with all the models built using SMOTE sampling technique
