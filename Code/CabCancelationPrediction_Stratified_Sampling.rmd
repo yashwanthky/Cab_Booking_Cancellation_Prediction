@@ -1,0 +1,1236 @@
+---
+title: "Predicting cab cancelation"
+subtitle: "Data Mining Final Project"
+authors: "Yashwanth Kumar Y"
+output:
+  html_document:
+    df_print: paged
+    toc: true
+    toc_depth: "6"
+    toc_float: true
+    collapsed: false
+
+---
+
+### Initial Setup
+
+#### Loading the required packages
+```{r, warning=FALSE, message=FALSE}
+pkgs <- c(
+  "tidyverse",    # To clean data, filter, subset, plot graphs, organize data in nicer data formats using tibble 
+  "DT",           # To display the data in a clean table format with options to select/ de-select columns
+  #"knitr",        # To display the data in a clean table format, helps with commands such as head
+  "plotly",       # For interactive plots
+  #"lattice",      # To plot multiple clean looking graphs
+  "stringr",      # To handle character strings better
+  "lubridate",    # For handling date and time columns
+  #"kableExtra",   # To help customize the style of tables to be displayed
+  "DataExplorer", # For automated scanning and visualization of the variables
+  #"scales",       # To control the appearance of axis and legend labels 
+  "cowplot",      # To place multiple plots adjacent to each other
+  #"directlabels", # To manipulate labels
+  "ggmap",        # To plot latitude and longitude information on the map
+  "dplyr",
+  "geosphere",
+  "ggplot2",
+  "reshape",
+  "splitstackshape",
+   "ROCR")
+
+
+# Install required (CRAN) packages
+for (pkg in pkgs) {
+  if (!(pkg %in% installed.packages()[, "Package"])) {
+    install.packages(pkg)
+  }
+}
+
+lapply(pkgs, require, character.only = TRUE)
+
+```
+
+#### Importing the dataset
+```{r}
+yourcabs_train <- read.csv("Kaggle_YourCabs_training.csv", header = T, stringsAsFactors = F, na.strings = "NULL")
+
+yourcabs_test <- read.csv("Kaggle_YourCabs_score.csv", header = T, stringsAsFactors = F, na.strings = "NULL")
+
+
+names(yourcabs_test)[19] <- "Car_Cancellation"
+names(yourcabs_test)[20] <- "Cost_of_error"
+
+colnames(yourcabs_train)
+colnames(yourcabs_test)
+complete_data <- rbind(yourcabs_train, yourcabs_test)
+```
+
+```{r}
+glimpse(complete_data)
+```
+
+***
+
+***
+
+### Data Preparation
+
+A quick glimpse of the dataset indicate that certain columns need to be type casted. 
+
+Variables that need to be treated as factors include -
+
+* `vehicle_model_id`
+* `package_id`
+* `travel_type_id`
+* `from_area_id`
+* `to_area_id`
+* `from_city_id`
+* `to_city_id`
+* `online_booking`
+* `mobile_site_booking`
+* `car_cancellation`
+
+
+The variables `from_date`, `to_date`, and `booking_created` need to be handled as date 
+
+```{r}
+complete_data$vehicle_model_id = as.factor(complete_data$vehicle_model_id)
+complete_data$package_id = as.factor(complete_data$package_id)
+complete_data$travel_type_id = as.factor(complete_data$travel_type_id)
+complete_data$from_area_id = as.factor(complete_data$from_area_id)
+complete_data$to_area_id = as.factor(complete_data$to_area_id)
+complete_data$online_booking = as.factor(complete_data$online_booking)
+complete_data$mobile_site_booking = as.factor(complete_data$mobile_site_booking)
+complete_data$Car_Cancellation = as.factor(complete_data$Car_Cancellation)
+
+complete_data$booking_created <- strptime(complete_data$booking_created, format = "%m/%d/%Y %H:%M")
+complete_data$from_date <- strptime(complete_data$from_date, format = "%m/%d/%Y %H:%M")
+
+complete_data$booking_created <- as.POSIXct(complete_data$booking_created)
+complete_data$from_date <- as.POSIXct(complete_data$from_date)
+
+#complete_data$to_date <- strptime(complete_data$to_date, format = "%m/%d/%Y %H:%M")
+```
+
+**Viewing the summary of the transformed dataset**
+```{r}
+summary(complete_data)
+```
+
+Checking for the missing values
+
+```{r}
+apply(is.na(complete_data), 2, sum)
+```
+
+As we see that there are many varaibles with large number of missing values. 
+
+***
+
+***
+
+#### Missing values treatment
+
+**Package Id**
+Package Id is applicable only for hourly rentals. For `travel_type_id` = 1 (long distance) or 2 (point-to-point) we will populate `package_id` = 0
+```{r}
+library(dplyr)
+
+complete_data_treated <- complete_data 
+
+complete_data_treated <- complete_data_treated %>% 
+                          dplyr::mutate(package_id_new = ifelse(is.na(package_id) & travel_type_id!=3, 0,package_id))
+
+complete_data_treated$package_id <- NULL
+```
+
+```{r}
+apply(is.na(complete_data_treated), 2, sum)
+```
+
+Wherever `from_area_id` is NULL ,from_lat and from_long are also NULL. So there is no way to impute "from_area_id". Same is the case with `to_area_id`
+
+
+**Creating lookup table for city_id using latitude and longitude**
+```{r}
+city_id_lookup_from <- complete_data_treated[,c("from_lat", "from_long", "from_city_id")]
+city_id_lookup_to <- complete_data_treated[,c("to_lat", "to_long", "to_city_id")]
+
+names(city_id_lookup_from) <- c("Latitude", "Longitude", "City_Id")
+names(city_id_lookup_to) <- c("Latitude", "Longitude", "City_Id")
+
+city_id_lookup <- rbind(city_id_lookup_from, city_id_lookup_to)
+
+#city_id_lookup$Latitude <- round(city_id_lookup$Latitude, 2)
+#city_id_lookup$Longitude <- round(city_id_lookup$Longitude, 2)
+
+city_id_lookup <- city_id_lookup[complete.cases(city_id_lookup),]
+
+city_id_lookup <- city_id_lookup[!duplicated(city_id_lookup$Latitude, city_id_lookup$Longitude),]
+
+View(city_id_lookup)
+```
+
+
+**Imputing missing `from_city_id` values**
+```{r}
+index <- which(is.na(complete_data_treated$from_city_id) & !is.na(complete_data_treated$from_lat) & !is.na(complete_data_treated$from_long))
+
+for(k in 4:1)
+{
+    #index <- which(is.na(airbnb_listings_2BR$zipcode))
+  
+    for(i in index)
+    {
+      for(j in 1:nrow(city_id_lookup))
+      {
+        if(round(complete_data_treated$from_lat[i],k) == round(city_id_lookup$Latitude[j],k) &&      round(complete_data_treated$from_long[i],k) == round(city_id_lookup$Longitude[j],k))
+        {
+          complete_data_treated$from_city_id[i] = city_id_lookup$City_Id[j]
+          break
+        }
+    }
+  }
+}
+
+
+##Converting from_city_id to factor
+complete_data_treated$from_city_id <- as.factor(complete_data_treated$from_city_id)
+
+summary(complete_data_treated$from_city_id)
+
+##Replacing the missing city ids with the mode value i.e 15
+
+complete_data_treated$from_city_id[is.na(complete_data_treated$from_city_id)] <- 15
+
+```
+
+
+**Imputing missing `to_city_id` values**
+```{r}
+index <- which(is.na(complete_data_treated$to_city_id) & !is.na(complete_data_treated$to_lat) & !is.na(complete_data_treated$to_long))
+
+for(k in 4:1)
+{
+  
+    for(i in index)
+    {
+      for(j in 1:nrow(city_id_lookup))
+      {
+        if(round(complete_data_treated$to_lat[i],k) == round(city_id_lookup$Latitude[j],k) &&      round(complete_data_treated$to_long[i],k) == round(city_id_lookup$Longitude[j],k))
+        {
+          complete_data_treated$to_city_id[i] = city_id_lookup$City_Id[j]
+          break
+        }
+    }
+  }
+}
+
+##Converting to_city_id to factor
+complete_data_treated$to_city_id <- as.factor(complete_data_treated$to_city_id)
+
+summary(complete_data_treated$to_city_id)
+
+##Replacing the missing city ids with the mode value i.e 15
+
+complete_data_treated$to_city_id[is.na(complete_data_treated$to_city_id)] <- 15
+
+```
+
+***
+
+***
+
+
+### Feature Engineering
+
+We will create some additional variables that may be significant in predciting cab cancelation
+
+* mode_of_booking
+* trip distance
+* waiting time
+* is_weekend
+* weekday indicator variables
+* time_of_the_day
+
+
+**Mode of booking**
+
+If Online Booking = 1, then mode_of_booking = "Ol"
+If Mobile Site booking = 1, then mode_of_booking = "Mo"
+Else "Ot"
+
+```{r}
+complete_data_treated$mode_of_booking <- ifelse(complete_data_treated$online_booking == 1, "Ol", 
+                                                ifelse(complete_data_treated$mobile_site_booking == 1, "Mo", "Ot"))
+
+View(complete_data_treated[c("online_booking", "mobile_site_booking", "mode_of_booking")])
+```
+
+
+**Trip Distance - trip_dist**
+```{r}
+# complete_data_treated$trip_dist <- sqrt((complete_data_treated$to_long - complete_data_treated$from_long)^2+                                         (complete_data_treated$to_lat - complete_data_treated$from_lat)^2)
+
+complete_data_treated <- complete_data_treated %>% rowwise() %>% 
+    mutate(trip_dist = distHaversine(c(from_long, from_lat), c(to_long, to_lat)))
+
+
+summary(complete_data_treated$trip_dist)
+
+#Imputing the missing trip distances with the median value
+
+complete_data_treated$trip_dist[is.na(complete_data_treated$trip_dist)] <- median(complete_data_treated$trip_dist, na.rm = T)
+
+```
+
+
+**Waiting Time - wait_time**
+```{r}
+complete_data_treated$wait_time <- as.numeric(difftime(complete_data_treated$from_date,             complete_data_treated$booking_created, units = "mins"))
+
+View(complete_data_treated[,c("from_date", "booking_created", "wait_time","travel_type_id")])
+
+
+summary(complete_data_treated$wait_time)
+
+#Imputing missing wait time values by the median value
+complete_data_treated$wait_time[is.na(complete_data_treated$wait_time)] <- median(complete_data_treated$wait_time, na.rm = T)
+
+```
+
+
+*Need to check - For long distance and hourly rental - number of days left for the trip when cancelation was made*
+
+**Booking made on a weekend or not - is_weekend**
+```{r}
+complete_data_treated$weekday <- weekdays(complete_data_treated$booking_created)
+
+complete_data_treated$is_weekend <- ifelse(complete_data_treated$weekday %in% c("Friday","Saturday","Sunday"), "Y","N")
+
+View(complete_data_treated[,c("weekday","is_weekend")])
+```
+
+
+**Indicator variable for each weekday**
+```{r}
+complete_data_treated$mon <- ifelse(complete_data_treated$weekday == "Monday", 1, 0)
+complete_data_treated$tue <- ifelse(complete_data_treated$weekday == "Tuesday", 1, 0)
+complete_data_treated$wed <- ifelse(complete_data_treated$weekday == "Wednesday", 1, 0)
+complete_data_treated$thu <- ifelse(complete_data_treated$weekday == "Thursday", 1, 0)
+complete_data_treated$fri <- ifelse(complete_data_treated$weekday == "Friday", 1, 0)
+complete_data_treated$sat <- ifelse(complete_data_treated$weekday == "Saturday", 1, 0)
+complete_data_treated$sun <- ifelse(complete_data_treated$weekday == "Sunday", 1, 0)
+
+View(complete_data_treated)
+
+#complete_data_treated$weekday <- NULL " To be deleted after performing EDA
+complete_data_treated$online_booking <- NULL
+complete_data_treated$mobile_site_booking <- NULL
+complete_data_treated$to_date <- NULL
+colnames(complete_data_treated)
+```
+
+
+**Time of the day - Morning, Afternnon, Evening, Night/ Rush-hours**
+```{r}
+complete_data_treated$hour <- hour(complete_data_treated$from_date)
+ggplot(data = complete_data_treated, aes(hour)) + 
+  geom_bar(fill = I("brown")) +
+  ggtitle("Distribution of bookings by time of day") +
+  labs(x = "Time of Day", y = "Frequency") +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+
+Based on the histogram above, we will create the time of day into buckets - "Morning", "Afternoon", "Evening", "Rush Hours", and "Night"
+
+```{r}
+
+complete_data_treated$time_of_day <- ifelse((complete_data_treated$hour >= 0 & complete_data_treated$hour <= 2), "Night", 
+                                            ifelse((complete_data_treated$hour >= 3 & complete_data_treated$hour <= 6), "Morning",
+                                                   ifelse((complete_data_treated$hour >= 10 & complete_data_treated$hour <= 16), "Afternoon",
+                                                          ifelse((complete_data_treated$hour >= 19 & complete_data_treated$hour <= 23), "Evening","Rush"))))
+                                          
+```
+
+
+***
+
+***
+
+### Exploratory Data Analysis
+
+Understanding the relationship of the response variable with each predictor variable
+
+#### Mode of booking
+```{r}
+complete_data_treated[1:43431,] %>% 
+  select(mode_of_booking, Car_Cancellation) %>%
+    group_by(mode_of_booking) %>%
+      melt(id = "mode_of_booking") %>%
+        group_by(mode_of_booking) %>%
+          count(value) %>%
+            ggplot(aes(fill = as.factor(value), y = n, x = mode_of_booking)) +
+              geom_bar(position = "dodge", stat = "identity") +
+                theme_classic() +
+                  scale_fill_manual(values = c("darkgray", "dodgerblue4"),
+                                    name = "Status", 
+                                    labels = c("Uncanceled", "Canceled")) + 
+                    labs(title = "Relationship between Mode of Booking and Cab Cancelation Status", 
+                         x = "Mode of Booking",
+                         y = "Frequency") +
+                      geom_text(aes(label=n),size=3, position=position_dodge(width=0.9), vjust=-0.25)
+                
+```
+
+
+#### Package Type
+```{r}
+complete_data_treated[1:43431,] %>% 
+  select(package_id_new, Car_Cancellation) %>%
+    group_by(package_id_new) %>%
+      melt(id = "package_id_new") %>%
+        group_by(package_id_new) %>%
+          count(value) %>%
+            ggplot(aes(fill = as.factor(value), y = n, x = package_id_new)) +
+              geom_bar(position = "dodge", stat = "identity") +
+                  theme_classic() +
+                    scale_fill_manual(values = c("darkgray", "dodgerblue4"),
+                                      name = "Status", 
+                                      labels = c("Uncanceled", "Canceled")) + 
+                      labs(title = "Relationship between Booking Package Type and Cab Cancelation Status", 
+                           x = "Package Type",
+                           y = "Frequency") +
+                        geom_text(aes(label=n),size=3, position=position_dodge(width=0.9), vjust=-0.25)
+```
+
+
+#### Vehicle type
+```{r, warning=FALSE, error=FALSE, message=FALSE}
+complete_data_treated[1:43431,] %>% 
+  select(vehicle_model_id, Car_Cancellation) %>%
+    group_by(vehicle_model_id) %>%
+          dcast(formula = (vehicle_model_id ~ Car_Cancellation), fun.aggregate = length)
+            
+```
+
+
+#### Travel Type Id
+```{r}
+complete_data_treated[1:43431,] %>% 
+  select(travel_type_id, Car_Cancellation) %>%
+    group_by(travel_type_id) %>%
+      melt(id = "travel_type_id") %>%
+        group_by(travel_type_id) %>%
+          count(value) %>%
+            ggplot(aes(fill = as.factor(value), y = n, x = travel_type_id)) +
+              geom_bar(position = "dodge", stat = "identity") +
+                  theme_classic() +
+                    scale_fill_manual(values = c("darkgray", "dodgerblue4"),
+                                      name = "Status", 
+                                      labels = c("Uncanceled", "Canceled")) + 
+                      labs(title = "Relationship between Travel Type and Cab Cancelation Status", 
+                           x = "Travel Type",
+                           y = "Frequency") +
+                        geom_text(aes(label=n),size=3, position=position_dodge(width=0.9), vjust=-0.25)
+```
+
+#### Day of Booking
+```{r}
+complete_data_treated$weekday <- factor(complete_data_treated$weekday,
+                                        levels = c("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"))
+
+complete_data_treated[1:43431,] %>% 
+  select(weekday, Car_Cancellation) %>%
+    group_by(weekday) %>%
+      melt(id = "weekday") %>%
+        group_by(weekday) %>%
+          count(value) %>%
+            ggplot(aes(fill = as.factor(value), y = n, x = weekday)) +
+              geom_bar(position = "stack", stat = "identity") +
+                  theme_classic() +
+                    scale_fill_manual(values = c("darkgray", "dodgerblue4"),
+                                      name = "Status", 
+                                      labels = c("Uncanceled", "Canceled")) + 
+                      labs(title = "Relationship between Booking Day and Cab Cancelation Status", 
+                           x = "Day of Booking",
+                           y = "Frequency") +
+                        geom_text(aes(label=n),size=3, position=position_dodge(width=0.9), vjust=-0.25)
+```
+
+#### Weekend vs Weekday
+```{r}
+complete_data_treated[1:43431,] %>% 
+  select(is_weekend, Car_Cancellation) %>%
+    group_by(is_weekend) %>%
+      melt(id = "is_weekend") %>%
+        group_by(is_weekend) %>%
+          count(value) %>%
+            ggplot(aes(fill = as.factor(value), y = n, x = is_weekend)) +
+              geom_bar(position = "dodge", stat = "identity") +
+                  theme_classic() +
+                    scale_fill_manual(values = c("darkgray", "dodgerblue4"),
+                                      name = "Status", 
+                                      labels = c("Uncanceled", "Canceled")) + 
+                      labs(title = "Relationship between Weekday Type and Cab Cancelation Status", 
+                           x = "Weekday Type",
+                           y = "Frequency") +
+                        geom_text(aes(label=n),size=3, position=position_dodge(width=0.9), vjust=-0.25)
+```
+
+
+#### Trip Distance
+```{r}
+complete_data_treated[1:43431,] %>% 
+  select(trip_dist, Car_Cancellation) %>%
+    ggplot(aes(x = as.factor(Car_Cancellation), y = trip_dist, fill = as.factor(Car_Cancellation))) +
+      geom_boxplot() +
+        theme_classic() +
+          scale_fill_manual(values = c("darkgray", "dodgerblue4"),
+                                      name = "Status", 
+                                      labels = c("Uncanceled", "Canceled")) + 
+            labs(title = "Relationship between Trip Distance and Cab Cancelation Status", 
+                           x = "Cab Cancelation Status",
+                           y = "Trip Distance")
+```
+
+#### From City
+```{r}
+complete_data_treated[1:43431,] %>% 
+  select(from_city_id, Car_Cancellation) %>%
+    group_by(from_city_id) %>%
+      melt(id = "from_city_id") %>%
+        group_by(from_city_id) %>%
+          count(value) %>%
+            ggplot(aes(fill = as.factor(value), y = n, x = from_city_id)) +
+              geom_bar(position = "dodge", stat = "identity") +
+                  theme_classic() +
+                    scale_fill_manual(values = c("darkgray", "dodgerblue4"),
+                                      name = "Status", 
+                                      labels = c("Uncanceled", "Canceled")) + 
+                      labs(title = "Relationship between Origin City Id and Cab Cancelation Status", 
+                           x = "Origin City Id",
+                           y = "Frequency") +
+                        geom_text(aes(label=n),size=3, position=position_dodge(width=0.9), vjust=-0.25)
+```
+
+
+#### To City
+```{r, error=FALSE, message=FALSE, warning=FALSE}
+complete_data_treated[1:43431,] %>% 
+  select(to_city_id, Car_Cancellation) %>%
+    group_by(to_city_id) %>%
+          dcast(formula = (to_city_id ~ Car_Cancellation), fun.aggregate = length)
+```
+
+***
+
+***
+
+### Analytical Dataset Creation
+
+**Dropping irrelevant columns**
+
+```{r}
+analytical_dataset <- complete_data_treated
+write.csv(complete_data_treated, "dataset_complete_before_ADS.csv")
+analytical_dataset <- read.csv("dataset_complete_before_ADS.csv", header = T, stringsAsFactors = T, na.strings = "NULL")
+analytical_dataset = subset(analytical_dataset, select = -c(X) )
+
+analytical_dataset$from_area_id <- NULL
+analytical_dataset$to_area_id <- NULL
+analytical_dataset$weekday <- NULL
+analytical_dataset$from_date <- NULL
+analytical_dataset$booking_created <- NULL
+analytical_dataset$from_lat <- NULL
+analytical_dataset$from_long <- NULL
+analytical_dataset$to_lat <- NULL
+analytical_dataset$to_long <- NULL
+analytical_dataset$Cost_of_error <- NULL
+
+analytical_dataset$id <- NULL
+analytical_dataset$user_id <- NULL
+analytical_dataset$time_of_day <- NULL
+analytical_dataset$is_weekend <- NULL
+
+# Due to model running issues
+analytical_dataset$from_city_id <- NULL
+analytical_dataset$to_city_id <- NULL
+
+
+analytical_dataset$package_id_new = as.factor(analytical_dataset$package_id_new)
+analytical_dataset$mode_of_booking = as.factor(analytical_dataset$mode_of_booking)
+#analytical_dataset$is_weekend = as.factor(analytical_dataset$is_weekend)
+analytical_dataset$mon = as.factor(analytical_dataset$mon)
+analytical_dataset$tue = as.factor(analytical_dataset$tue)
+analytical_dataset$wed = as.factor(analytical_dataset$wed)
+analytical_dataset$thu = as.factor(analytical_dataset$thu)
+analytical_dataset$fri = as.factor(analytical_dataset$fri)
+analytical_dataset$sat = as.factor(analytical_dataset$sat)
+analytical_dataset$sun = as.factor(analytical_dataset$sun)
+analytical_dataset$hour = as.factor(analytical_dataset$hour)
+
+colnames(analytical_dataset)
+glimpse(analytical_dataset)
+#length(unique(analytical_dataset$user_id))
+apply(is.na(analytical_dataset), 2, sum)
+
+#write.csv(analytical_dataset, "analytical_dataset_final.csv")
+```
+
+
+Divide into complete and scoring, further divide complete into train and test, then take a **stratified sample** from train.
+
+```{r}
+set.seed(12345)
+complete_set <- analytical_dataset[1:43431,]
+scoring_set <- analytical_dataset[43432:53431,]
+
+index <- sample(nrow(complete_set),nrow(complete_set)*0.70)
+complete_set_train = complete_set[index,]
+complete_set_test = complete_set[-index,]
+
+colSums(is.na(complete_set_train))
+colSums(is.na(complete_set_test))
+
+complete_set_train <- na.omit(complete_set_train)
+complete_set_test <- na.omit(complete_set_test)
+
+complete_set_train_strat <- stratified(complete_set_train,
+                                                   group = c("Car_Cancellation","vehicle_model_id"),
+                                                   size = table(complete_set_train$Car_Cancellation)[2])
+```
+
+***
+
+***
+
+### Model Building
+
+
+#### Logistic Regression
+
+```{r}
+
+cab_cancel_glm0<- glm(Car_Cancellation~., family=binomial, data=complete_set_train_strat)
+
+```
+
+```{r}
+summary(cab_cancel_glm0)
+```
+
+Let us re-fit the model with only the significant variables.
+
+```{r}
+cab_cancel_glm0 <- glm(Car_Cancellation ~ travel_type_id + package_id_new +
+                        mode_of_booking + trip_dist + wait_time + mon + tue + wed +
+                        thu + fri + sat + hour, family=binomial, data=complete_set_train_strat)
+```
+
+
+We sill check performance on training dataset first.
+
+```{r}
+pred.cab_cancel_glm0_train <- predict(cab_cancel_glm0, type="response")
+pred <- prediction(pred.cab_cancel_glm0_train, complete_set_train_strat$Car_Cancellation)
+perf <- performance(pred, "tpr", "fpr")
+plot(perf, colorize=TRUE)
+unlist(slot(performance(pred, "auc"), "y.values"))
+```
+
+The are under curve is 0.823 and we will check its performance on the test dataset.
+
+```{r}
+# complete_set_test <- complete_set_test %>% 
+#   filter(vehicle_model_id != 14 & vehicle_model_id != 70 & vehicle_model_id != 75)
+# 
+# # complete_set_test <- complete_set_test %>% 
+# #   filter(package_id_new != 5)
+
+pred.cab_cancel_glm0_test <- predict(cab_cancel_glm0, newdata = complete_set_test, type="response")
+pred <- prediction(pred.cab_cancel_glm0_test, complete_set_test$Car_Cancellation)
+perf <- performance(pred, "tpr", "fpr")
+plot(perf, colorize=TRUE)
+unlist(slot(performance(pred, "auc"), "y.values"))
+```
+
+Now, we will only stratify on Car_cancellations and see the difference between train and test.
+
+```{r}
+
+complete_set <- analytical_dataset[1:43431,]
+scoring_set <- analytical_dataset[43432:53431,]
+
+index <- sample(nrow(complete_set),nrow(complete_set)*0.70)
+complete_set_train = complete_set[index,]
+complete_set_test = complete_set[-index,]
+
+colSums(is.na(complete_set_train))
+colSums(is.na(complete_set_test))
+
+complete_set_train <- na.omit(complete_set_train)
+complete_set_test <- na.omit(complete_set_test)
+
+complete_set_train_strat <- stratified(complete_set_train,
+                                                   group = c("Car_Cancellation"),
+                                                   size = table(complete_set_train$Car_Cancellation)[2])
+
+
+cab_cancel_glm0 <- glm(Car_Cancellation~., family=binomial, data=complete_set_train_strat)
+summary(cab_cancel_glm0)
+
+cab_cancel_glm0 <- glm(Car_Cancellation ~ travel_type_id + package_id_new +
+                        mode_of_booking + trip_dist + wait_time + mon + tue + wed +
+                        fri + sat + hour, family=binomial, data=complete_set_train_strat)
+
+pred.cab_cancel_glm0_train <- predict(cab_cancel_glm0, type="response")
+pred <- prediction(pred.cab_cancel_glm0_train, complete_set_train_strat$Car_Cancellation)
+perf <- performance(pred, "tpr", "fpr")
+plot(perf, colorize=TRUE)
+unlist(slot(performance(pred, "auc"), "y.values"))
+
+
+
+# complete_set_test <- complete_set_test %>%
+#   filter(vehicle_model_id != 36 & vehicle_model_id != 69 & vehicle_model_id != 70 & vehicle_model_id != 72 & vehicle_model_id != 76 )
+complete_set_test <- complete_set_test %>%
+  filter(package_id_new != 5)
+
+
+pred.cab_cancel_glm0_test <- predict(cab_cancel_glm0, newdata = complete_set_test, type="response")
+pred <- prediction(pred.cab_cancel_glm0_test, complete_set_test$Car_Cancellation)
+perf <- performance(pred, "tpr", "fpr")
+plot(perf, colorize=TRUE)
+unlist(slot(performance(pred, "auc"), "y.values"))
+
+
+```
+
+
+Here, the drop from train to test is lower when we take a stratified sample just based on 'Car_Cancellations' and also the AUC on test dataset is similar in both cases.
+
+Therefore, we proceed with the latter case.
+
+We will take a cut - off probability of 0.5 and see the misclassification rate and false negative rate.
+
+```{r}
+
+pcut <- 0.5
+class.glm0.train <- (pred.cab_cancel_glm0_train>pcut)*1
+# get confusion matrix
+table(complete_set_train_strat$Car_Cancellation, class.glm0.train, dnn = c("True", "Predicted"))
+
+#Mis classification Rate
+(MR<- mean(complete_set_train_strat$Car_Cancellation != class.glm0.train))
+# False negative rate
+(FNR<- sum(complete_set_train_strat$Car_Cancellation==1 & class.glm0.train==0)/sum(complete_set_train_strat$Car_Cancellation==1))
+
+```
+
+Now, let us see the performance on test.
+
+```{r}
+
+class.glm0.test <- (pred.cab_cancel_glm0_test>pcut)*1
+# get confusion matrix
+table(complete_set_test$Car_Cancellation, class.glm0.test, dnn = c("True", "Predicted"))
+
+#Mis classification Rate
+(MR<- mean(complete_set_test$Car_Cancellation != class.glm0.test))
+# False negative rate
+(FNR<- sum(complete_set_test$Car_Cancellation == 1 & class.glm0.test==0)/sum(complete_set_test$Car_Cancellation==1))
+
+```
+
+The misclassification rate goes up by 1% and FNR has a negligible increase on the test dataset. We have a decent performing model with AUC value of 0.78 and an FNR of 28%.
+
+Let us quickly check if step wise selection with BIC criterion drops any of the variables.
+
+```{r}
+
+cab_cancel_glm.back.BIC <- step(cab_cancel_glm0, k=log(nrow(complete_set_train_strat))) 
+
+```
+
+ got a model with less number of variables and 
+
+```{r}
+AIC(cab_cancel_glm0)
+AIC(cab_cancel_glm.back.BIC)
+
+summary(cab_cancel_glm0)
+summary(cab_cancel_glm.back.BIC)
+
+```
+
+We see an increase of 100 in the value of AIC when we do backward selection, however we have 3 fewer variables as predictors and is thus a simpler model. Hence, we will choose the BIC model if the drop in AUC value is not high and the rise in FPR is not significant.
+
+Let us quickly check the AUC value, Misclassification rate and FPR for this model.
+
+```{r}
+pred.cab_cancel_glm0_test <- predict(cab_cancel_glm.back.BIC, newdata = complete_set_test, type="response")
+pred <- prediction(pred.cab_cancel_glm0_test, complete_set_test$Car_Cancellation)
+perf <- performance(pred, "tpr", "fpr")
+plot(perf, colorize=TRUE)
+unlist(slot(performance(pred, "auc"), "y.values"))
+
+class.glm0.test <- (pred.cab_cancel_glm0_test>pcut)*1
+# get confusion matrix
+table(complete_set_test$Car_Cancellation, class.glm0.test, dnn = c("True", "Predicted"))
+
+#Mis classification Rate
+(MR<- mean(complete_set_test$Car_Cancellation != class.glm0.test))
+# False negative rate
+(FNR<- sum(complete_set_test$Car_Cancellation == 1 & class.glm0.test==0)/sum(complete_set_test$Car_Cancellation==1))
+
+
+```
+
+The performance does not deteriorate too much with the new model obtained from backward selection and hence we choose this model as it is simpler with 3 fewer variables as compared to the prior model.
+
+***
+
+***
+
+#### TREEs Model Building
+
+##### Decision Trees
+
+Divide into complete and scoring, further divide complete into train and test, then take a stratified sample from train.
+
+```{r}
+complete_set <- analytical_dataset[1:43431,]
+scoring_set <- analytical_dataset[43432:53431,]
+
+index <- sample(nrow(complete_set),nrow(complete_set)*0.70)
+complete_set_train = complete_set[index,]
+complete_set_test = complete_set[-index,]
+
+colSums(is.na(complete_set_train))
+colSums(is.na(complete_set_test))
+
+complete_set_train <- na.omit(complete_set_train)
+complete_set_test <- na.omit(complete_set_test)
+
+complete_set_train_strat <- stratified(complete_set_train,
+                                                   group = c("Car_Cancellation","vehicle_model_id"),
+                                                   size = table(complete_set_train$Car_Cancellation)[2])
+```
+
+```{r}
+glimpse(complete_set_test)
+```
+
+
+```{r}
+library(rpart)
+library(rpart.plot)
+library(caret)
+
+# Generate classification tree
+default.ct <- rpart(Car_Cancellation ~ ., data = complete_set_train_strat, method = "class")
+
+# plot tree
+prp(default.ct, type = 1, extra = 1)
+
+# generate confusion matrix for training data
+default.ct.point.pred.train <- predict(default.ct,complete_set_train_strat,type = "class")
+confusionMatrix(droplevels(default.ct.point.pred.train), droplevels(complete_set_train_strat$Car_Cancellation))
+
+```
+
+```{r}
+default.ct
+```
+
+*In-sample model performance evaluation*
+```{r}
+# 1. calculate the TPR and FPR (= 1-TNR) for all possible thresholds. Use the class probability as predictor
+library(pROC)
+myRoc <- roc(response = droplevels(complete_set_train_strat$Car_Cancellation), predictor = as.numeric(default.ct.point.pred.train))
+# table(droplevels(complete_set_train_strat$Car_Cancellation))
+myRoc
+
+# 2. print TPR against FPR to obtain the roc curve
+plot(myRoc)
+
+#Mis classification Rate
+(MR<- mean(complete_set_train_strat$Car_Cancellation != default.ct.point.pred.train))
+# False negative rate
+(FNR<- sum(complete_set_train_strat$Car_Cancellation == 1 & default.ct.point.pred.train==0)/sum(complete_set_train_strat$Car_Cancellation==1))
+
+```
+
+
+*Out-of-sample model performance evaluation*
+```{r}
+# generate confusion matrix for testing data
+default.ct.point.pred.test <- predict(default.ct,complete_set_test,type = "class")
+confusionMatrix(droplevels(default.ct.point.pred.test), droplevels(complete_set_test$Car_Cancellation))
+
+```
+
+
+```{r}
+# 1. calculate the TPR and FPR (= 1-TNR) for all possible thresholds. Use the class probability as predictor
+library(pROC)
+myRoc <- roc(response = droplevels(complete_set_test$Car_Cancellation), predictor = as.numeric(default.ct.point.pred.test))
+# table(droplevels(complete_set_train_strat$Car_Cancellation))
+myRoc
+
+# 2. print TPR against FPR to obtain the roc curve
+plot(myRoc)
+
+#Mis classification Rate
+(MR<- mean(complete_set_test$Car_Cancellation != default.ct.point.pred.test))
+# False negative rate
+(FNR<- sum(complete_set_test$Car_Cancellation == 1 & default.ct.point.pred.test==0)/sum(complete_set_test$Car_Cancellation==1))
+
+```
+
+
+***
+
+***
+
+##### Prune the tree
+
+```{r}
+library(rpart)
+library(rpart.plot)
+
+car.largetree <- rpart(Car_Cancellation ~ ., data = complete_set_train_strat, cp = 0.001)
+
+prp(car.largetree)
+
+plotcp(car.largetree)
+
+```
+
+```{r}
+prune(car.largetree, cp = 0.003)
+
+# Generate classification tree
+car.pruned <- rpart(Car_Cancellation ~ ., data = complete_set_train_strat, cp = 0.006)
+
+# plot tree
+prp(car.pruned, type = 1, extra = 1)
+```
+
+
+***
+
+***
+
+##### Random Forest
+
+```{r}
+library(randomForest)
+
+credit.rf <- randomForest(droplevels(Car_Cancellation)~., data = complete_set_train_strat)
+credit.rf
+
+```
+
+```{r}
+plot(credit.rf, lwd=rep(2, 3))
+legend("right", legend = c("OOB Error", "FPR", "FNR"), lwd=rep(2, 3), lty = c(1,2,3), col = c("black", "red", "green"))
+```
+
+```{r}
+credit.rf.pred<- predict(credit.rf, type = "prob")[,2]
+costfunc = function(obs, pred.p, pcut){
+    weight1 = 5   # define the weight for "true=1 but pred=0" (FN)
+    weight0 = 1    # define the weight for "true=0 but pred=1" (FP)
+    c1 = (obs==1)&(pred.p<pcut)    # count for "true=1 but pred=0"   (FN)
+    c0 = (obs==0)&(pred.p>=pcut)   # count for "true=0 but pred=1"   (FP)
+    cost = mean(weight1*c1 + weight0*c0)  # misclassification with weight
+    return(cost) # you have to return to a value when you write R functions
+} 
+p.seq = seq(0.01, 0.5, 0.01)
+cost = rep(0, length(p.seq))  
+for(i in 1:length(p.seq)){ 
+    cost[i] = costfunc(obs = complete_set_train_strat$Car_Cancellation, pred.p = credit.rf.pred, pcut = p.seq[i])  
+}
+plot(p.seq, cost)
+```
+
+```{r}
+optimal.pcut
+```
+
+
+```{r}
+library(ROCR)
+pred <- prediction(credit.rf.pred, droplevels(complete_set_train_strat$Car_Cancellation))
+perf <- performance(pred, "tpr", "fpr")
+plot(perf, colorize=TRUE)
+```
+
+
+```{r}
+# generate confusion matrix for testing data
+default.ct.point.pred.train <- predict(credit.rf,complete_set_train_strat,type = "class")
+confusionMatrix(droplevels(default.ct.point.pred.train), droplevels(complete_set_train_strat$Car_Cancellation))
+
+```
+
+
+*In-sample model performance evaluation*
+```{r}
+# 1. calculate the TPR and FPR (= 1-TNR) for all possible thresholds. Use the class probability as predictor
+library(pROC)
+myRoc <- roc(response = droplevels(complete_set_train_strat$Car_Cancellation), predictor = as.numeric(default.ct.point.pred.train))
+# table(droplevels(complete_set_train_strat$Car_Cancellation))
+myRoc
+
+# 2. print TPR against FPR to obtain the roc curve
+plot(myRoc)
+
+#Mis classification Rate
+(MR<- mean(droplevels(complete_set_train_strat$Car_Cancellation) != default.ct.point.pred.train))
+# False negative rate
+(FNR<- sum(complete_set_train_strat$Car_Cancellation == 1 & default.ct.point.pred.train==0)/sum(complete_set_train_strat$Car_Cancellation==1))
+
+```
+
+
+*In-sample model performance evaluation*
+```{r}
+# generate confusion matrix for testing data
+default.ct.point.pred.test <- predict(credit.rf,complete_set_test,type = "class")
+confusionMatrix(droplevels(default.ct.point.pred.test), droplevels(complete_set_test$Car_Cancellation))
+
+```
+
+*Out-of-sample model performance evaluation*
+```{r}
+# 1. calculate the TPR and FPR (= 1-TNR) for all possible thresholds. Use the class probability as predictor
+library(pROC)
+myRoc <- roc(response = droplevels(complete_set_test$Car_Cancellation), predictor = as.numeric(default.ct.point.pred.test))
+# table(droplevels(complete_set_train_strat$Car_Cancellation))
+myRoc
+
+# 2. print TPR against FPR to obtain the roc curve
+plot(myRoc)
+
+#Mis classification Rate
+(MR<- mean(droplevels(complete_set_test$Car_Cancellation) != default.ct.point.pred.test))
+# False negative rate
+(FNR<- sum(complete_set_test$Car_Cancellation == 1 & default.ct.point.pred.test==0)/sum(complete_set_test$Car_Cancellation==1))
+
+```
+
+```{r}
+varImpPlot(credit.rf,type=2)
+
+```
+
+***
+
+***
+
+##### Grid search
+We also can define a grid of algorithm to tunning model. Each axis of grid is an algorithm parameter and point in grid are specific combinations of parameter.
+```{r}
+library(randomForest)
+library(caret)
+
+#Create control function for training with 10 folds and keep 3 folds for training. search method is grid.
+control <- trainControl(method='repeatedcv', 
+                        number=10, 
+                        repeats=3, 
+                        search='grid')
+#create tunegrid with 15 values from 1:15 for mtry to tunning model. Our train function will change number of entry variable at each split according to tunegrid. 
+tunegrid <- expand.grid(mtry = c(1:15)) 
+
+rf_gridsearch <- train(droplevels(Car_Cancellation) ~ ., 
+                       data = complete_set_train_strat,
+                       method = 'rf',
+                       metric = 'Accuracy',
+                       tuneGrid = tunegrid)
+print(rf_gridsearch)
+```
+
+```{r}
+plot(rf_gridsearch)
+```
+
+*In-sample model performance evaluation*
+```{r}
+pred <- predict(rf_gridsearch, complete_set_train_strat)
+confusionMatrix(pred, complete_set_train_strat$Car_Cancellation)
+
+# 1. calculate the TPR and FPR (= 1-TNR) for all possible thresholds. Use the class probability as predictor
+library(pROC)
+myRoc <- roc(response = droplevels(complete_set_train_strat$Car_Cancellation), predictor = as.numeric(pred))
+# table(droplevels(complete_set_train_strat$Car_Cancellation))
+myRoc
+
+# 2. print TPR against FPR to obtain the roc curve
+plot(myRoc)
+
+#Mis classification Rate
+(MR<- mean(droplevels(complete_set_train_strat$Car_Cancellation) != pred))
+# False negative rate
+(FNR<- sum(complete_set_train_strat$Car_Cancellation == 1 & pred==0)/sum(complete_set_train_strat$Car_Cancellation==1))
+
+```
+
+
+*Out-of-sample model performance evaluation*
+```{r}
+pred <- predict(rf_gridsearch, complete_set_test)
+confusionMatrix(pred, complete_set_test$Car_Cancellation)
+
+# 1. calculate the TPR and FPR (= 1-TNR) for all possible thresholds. Use the class probability as predictor
+library(pROC)
+myRoc <- roc(response = droplevels(complete_set_test$Car_Cancellation), predictor = as.numeric(pred))
+# table(droplevels(complete_set_train_strat$Car_Cancellation))
+myRoc
+
+# 2. print TPR against FPR to obtain the roc curve
+plot(myRoc)
+
+#Mis classification Rate
+(MR<- mean(droplevels(complete_set_test$Car_Cancellation) != pred))
+# False negative rate
+(FNR<- sum(complete_set_test$Car_Cancellation == 1 & pred==0)/sum(complete_set_test$Car_Cancellation==1))
+
+```
+
+```{r}
+varImp(rf_gridsearch)
+```
+
+***
+
+***
+
+
+
+#### Support Vector Machine (SVM)
+
+SVM is probably one of the best off-the-shelf classifiers for many of problems. It handles nonlinearity, is well regularized (avoids overfitting), have few parameters, and fast for large number of observations.
+
+```{r, message=FALSE}
+
+train_svm <- svm(Car_Cancellation ~., data = complete_set_train_strat, cost = 1, gamma = 1/length(complete_set_train_strat), probability = TRUE)
+```
+
+*In-sample performance evaluation*
+```{r}
+prob_train_svm <- predict(train_svm, complete_set_train_strat,probability = TRUE)
+prob_train_svm <- attr(prob_train_svm, 'probabilities')[,2] #This is needed because prob.svm gives a matrix
+pred_train_svm <- as.numeric((prob_train_svm >= 0.5))
+
+table(complete_set_train_strat$Car_Cancellation, pred_train_svm, dnn = c("Obs", "Pred"))
+
+# False positive rate
+FPR_svm_train <- sum(complete_set_train_strat$Car_Cancellation == 0 & pred_train_svm ==1 )/sum(complete_set_train_strat$Car_Cancellation == 0)
+# False Negative Rate
+FNR_svm_train <- sum(complete_set_train_strat$Car_Cancellation == 1 & pred_train_svm == 0)/sum(complete_set_train_strat$Car_Cancellation == 1)
+# Misclassification Rate
+MR_svm_train <- mean(complete_set_train_strat$Car_Cancellation != pred_train_svm)
+
+pred_train_roc <- prediction(prob_train_svm, complete_set_train_strat$Car_Cancellation, )
+perf_train_roc <- performance(pred_train_roc, "tpr", "fpr")
+
+cat("SVM train - \nFPR - ", FPR_svm_train, "\nFNR - ", FNR_svm_train, "\nMR - ", MR_svm_train, "\nAUC - ", unlist(slot(performance(pred_train_roc, "auc"), "y.values")))
+
+plot(perf_train_roc, colorize = TRUE)
+roc(complete_set_train_strat$Car_Cancellation, pred_train_svm, legacy.axes=TRUE, 
+          xlab="False Positive Rate", ylab="True Postive Rate",plot=TRUE, col="#377eb8", lwd=4, print.auc = TRUE)
+```
+
+
+*Out-of-sample performance evaluation*
+```{r}
+prob_test_svm <- predict(train_svm, newdata = complete_set_test, probability = TRUE)
+prob_test_svm <- attr(prob_test_svm, "probabilities")[,2]
+pred_test_svm <- as.numeric((prob_test_svm) >= 0.5)
+table(complete_set_test$Car_Cancellation, pred_test_svm, dnn = c("Obs", "Pred"))
+
+# False positive rate
+FPR_svm_test <- sum(complete_set_test$Car_Cancellation == 0 & pred_test_svm ==1 )/sum(complete_set_test$Car_Cancellation == 0)
+# False Negative Rate
+FNR_svm_test <- sum(complete_set_test$Car_Cancellation == 1 & pred_test_svm == 0)/sum(complete_set_test$Car_Cancellation == 1)
+# Misclassification Rate
+MR_svm_test <- mean(complete_set_test$Car_Cancellation != pred_test_svm)
+
+pred_test_roc <- prediction(prob_test_svm, complete_set_test$Car_Cancellation)
+perf_test_roc <- performance(pred_test_roc, "tpr", "fpr")
+
+cat("SVM test - \nFPR - ", FPR_svm_test, "\nFNR - ", FNR_svm_test, "\nMR - ", MR_svm_test, "\nAUC - ", unlist(slot(performance(pred_test_roc, "auc"), "y.values")))
+
+plot(perf_test_roc, colorize = TRUE)
+roc(complete_set_test$Car_Cancellation, pred_test_svm, legacy.axes=TRUE, 
+          xlab="False Positive Rate", ylab="True Postive Rate",plot=TRUE, col="#377eb8", lwd=4, print.auc = TRUE)
+```
+
+
+***
+
+***
+
+
+#### Neural Nets
+
+
+```{r}
+train_nnet <- nnet(as.factor(Car_Cancellation) ~., data=complete_set_train_strat, size = 3, decay = 0.1, maxit=500)
+```
+
+```{r, fig.width=10, fig.height=10}
+plotnet(train_nnet)
+```
+
+*In-sample performance evaluation*
+```{r}
+prob_nnet_train <- predict(train_nnet, type='raw')
+pred_nnet_train <- (prob_nnet_train >= 0.5)*1
+table(complete_set_train_strat$Car_Cancellation, pred_nnet_train, dnn=c("Observed","Predicted"))
+
+# False positive rate
+FPR_nnet_train <- sum(complete_set_train_strat$Car_Cancellation == 0 & pred_nnet_train ==1 )/sum(complete_set_train_strat$Car_Cancellation == 0)
+# False Negative Rate
+FNR_nnet_train <- sum(complete_set_train_strat$Car_Cancellation == 1 & pred_nnet_train == 0)/sum(complete_set_train_strat$Car_Cancellation == 1)
+# Misclassification Rate
+MR_nnet_train <- mean(complete_set_train_strat$Car_Cancellation != pred_nnet_train)
+
+pred_train_roc <- prediction(prob_nnet_train, complete_set_train_strat$Car_Cancellation)
+perf_train_roc <- performance(pred_train_roc, "tpr", "fpr")
+
+cat("NNET train - \nFPR - ", FPR_nnet_train, "\nFNR - ", FNR_nnet_train, "\nMR - ", MR_nnet_train, "\nAUC - ", unlist(slot(performance(pred_train_roc, "auc"), "y.values")))
+
+roc(complete_set_train_strat$Car_Cancellation, pred_nnet_train, legacy.axes=TRUE, 
+          xlab="False Positive Rate", ylab="True Postive Rate",plot=TRUE, col="#377eb8", lwd=4, print.auc = TRUE)
+```
+
+
+*Out-of-sample performance evaluation*
+```{r}
+prob_nnet_test <- predict(train_nnet, newdata = complete_set_test, type='raw')
+pred_nnet_test <- (prob_nnet_test >= 0.5)*1
+table(complete_set_test$Car_Cancellation, pred_nnet_test, dnn=c("Observed","Predicted"))
+
+# False positive rate
+FPR_nnet_test <- sum(complete_set_test$Car_Cancellation == 0 & pred_nnet_test ==1 )/sum(complete_set_test$Car_Cancellation == 0)
+# False Negative Rate
+FNR_nnet_test <- sum(complete_set_test$Car_Cancellation == 1 & pred_nnet_test == 0)/sum(complete_set_test$Car_Cancellation == 1)
+# Misclassification Rate
+MR_nnet_test <- mean(complete_set_test$Car_Cancellation != pred_nnet_test)
+
+pred_test_roc <- prediction(prob_nnet_test, complete_set_test$Car_Cancellation)
+perf_test_roc <- performance(pred_test_roc, "tpr", "fpr")
+
+cat("NNET test - \nFPR - ", FPR_nnet_test, "\nFNR - ", FNR_nnet_test, "\nMR - ", MR_nnet_test, "\nAUC - ", unlist(slot(performance(pred_test_roc, "auc"), "y.values")))
+
+roc(complete_set_test$Car_Cancellation, pred_nnet_test, legacy.axes=TRUE, 
+          xlab="False Positive Rate", ylab="True Postive Rate",plot=TRUE, col="#377eb8", lwd=4, print.auc = TRUE)
+```
+
+***
+
+***

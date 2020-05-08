@@ -1,0 +1,660 @@
+---
+title: "Predicting Cab Cancelation - Using SMOTE"
+subtitle: "Data Mining Final Project"
+authors: "Yashwanth Kumar Y"
+output:
+  html_document:
+    df_print: paged
+    toc: true
+    toc_depth: "6"
+    toc_float: true
+    collapsed: false
+
+---
+
+#### Loading the required packages
+```{r, warning=FALSE, message=FALSE}
+pkgs <- c(
+  "tidyverse",    # To clean data, filter, subset, plot graphs, organize data in nicer data formats using tibble 
+  "DT",           # To display the data in a clean table format with options to select/ de-select columns
+  #"knitr",        # To display the data in a clean table format, helps with commands such as head
+  "plotly",       # For interactive plots
+  #"lattice",      # To plot multiple clean looking graphs
+  "stringr",      # To handle character strings better
+  "lubridate",    # For handling date and time columns
+  #"kableExtra",   # To help customize the style of tables to be displayed
+  "DataExplorer", # For automated scanning and visualization of the variables
+  #"scales",       # To control the appearance of axis and legend labels 
+  "cowplot",      # To place multiple plots adjacent to each other
+  #"directlabels", # To manipulate labels
+  "ggmap",        # To plot latitude and longitude information on the map
+  "dplyr",
+  "geosphere",
+  "ggplot2",
+  "reshape",
+  "splitstackshape",
+   "ROCR")
+
+
+# Install required (CRAN) packages
+for (pkg in pkgs) {
+  if (!(pkg %in% installed.packages()[, "Package"])) {
+    install.packages(pkg)
+  }
+}
+
+lapply(pkgs, require, character.only = TRUE)
+
+```
+
+#### Continuing with the dataset created in the first code file
+```{r}
+apply(is.na(analytical_dataset), 2, sum)
+```
+
+
+Divide into complete and scoring,run SMOTE on the complete data and  further divide complete into train and test
+
+```{r}
+set.seed(12345)
+complete_set <- analytical_dataset[1:43431,]
+scoring_set <- analytical_dataset[43432:53431,]
+
+table(complete_set$Car_Cancellation)
+```
+
+**SMOTE**
+```{r}
+#SMOTE
+library(DMwR)
+complete_set_frame <- as.data.frame(complete_set)
+
+balanced_complete_set <- SMOTE(Car_Cancellation ~., complete_set_frame, perc.over = 200, k = 5, perc.under = 200)
+
+table(balanced_complete_set$Car_Cancellation)
+```
+
+**Splitting into training and testing datasets**
+```{r}
+index <- sample(nrow(balanced_complete_set),nrow(balanced_complete_set)*0.70)
+complete_set_train = balanced_complete_set[index,]
+complete_set_test = balanced_complete_set[-index,]
+
+colSums(is.na(complete_set_train))
+colSums(is.na(complete_set_test))
+
+complete_set_train <- na.omit(complete_set_train)
+complete_set_test <- na.omit(complete_set_test)
+
+```
+
+
+### Model Building
+
+
+#### Logistic Regression
+
+```{r}
+cab_cancel_glm0<- glm(Car_Cancellation~., family=binomial, data=complete_set_train)
+```
+
+```{r}
+summary(cab_cancel_glm0)
+```
+
+Let us re-fit the model with only the significant variables.
+
+```{r}
+cab_cancel_glm0 <- glm(Car_Cancellation ~ travel_type_id + package_id_new +
+                        mode_of_booking + trip_dist + wait_time + mon + tue + wed +
+                        thu + fri + sat + hour, family=binomial, data=complete_set_train)
+```
+
+
+We sill check performance on training dataset first.
+
+*In-sample model performance*
+```{r}
+pred.cab_cancel_glm0_train <- predict(cab_cancel_glm0, type="response")
+pred <- prediction(pred.cab_cancel_glm0_train, complete_set_train$Car_Cancellation)
+perf <- performance(pred, "tpr", "fpr")
+plot(perf, colorize=TRUE)
+```
+
+
+```{r}
+unlist(slot(performance(pred, "auc"), "y.values"))
+```
+
+The area under curve is 0.782 and we will check its performance on the test dataset.
+
+*Out-of-sample model performance*
+```{r}
+sum(complete_set_test$package_id_new == 5)
+complete_set_test <- complete_set_test[(!complete_set_test$package_id_new == 5),]
+
+pred.cab_cancel_glm0_test <- predict(cab_cancel_glm0, newdata = complete_set_test, type="response")
+pred <- prediction(pred.cab_cancel_glm0_test, complete_set_test$Car_Cancellation)
+perf <- performance(pred, "tpr", "fpr")
+plot(perf, colorize=TRUE)
+```
+
+
+```{r}
+unlist(slot(performance(pred, "auc"), "y.values"))
+```
+
+
+We will take a cut - off probability of 0.5 and see the misclassification rate and false negative rate.
+
+```{r}
+pcut <- 0.5
+class.glm0.train <- (pred.cab_cancel_glm0_train>pcut)*1
+
+# get confusion matrix
+table(complete_set_train$Car_Cancellation, class.glm0.train, dnn = c("True", "Predicted"))
+```
+
+
+```{r}
+#Mis classification Rate
+(MR<- mean(complete_set_train$Car_Cancellation != class.glm0.train))
+```
+```{r}
+# False negative rate
+(FPR<- sum(complete_set_train$Car_Cancellation==0 & class.glm0.train==1)/sum(complete_set_train$Car_Cancellation==0))
+
+```
+
+
+```{r}
+# False negative rate
+(FNR<- sum(complete_set_train$Car_Cancellation==1 & class.glm0.train==0)/sum(complete_set_train$Car_Cancellation==1))
+
+```
+
+Now, let us see the performance on test.
+
+```{r}
+class.glm0.test <- (pred.cab_cancel_glm0_test>pcut)*1
+
+# get confusion matrix
+table(complete_set_test$Car_Cancellation, class.glm0.test, dnn = c("True", "Predicted"))
+```
+
+
+```{r}
+#Mis classification Rate
+(MR<- mean(complete_set_test$Car_Cancellation != class.glm0.test))
+```
+
+
+```{r}
+# False negative rate
+(FNR<- sum(complete_set_test$Car_Cancellation == 1 & class.glm0.test==0)/sum(complete_set_test$Car_Cancellation==1))
+```
+
+```{r}
+# False positive rate
+(FPR<- sum(complete_set_test$Car_Cancellation == 0 & class.glm0.test==1)/sum(complete_set_test$Car_Cancellation==0))
+```
+
+The misclassification rate and FNR is same as that on train dataset. We have a decent performing model with AUC value of 0.78 and an FNR of 38%.
+
+Let us quickly check if we step wise selection with BIC criterion drops any of the variables.
+
+***
+
+***
+
+#### BIC Based Logistic Regression Model
+```{r}
+cab_cancel_glm.back.BIC <- step(cab_cancel_glm0, k=log(nrow(complete_set_train)), trace = 0) 
+summary(cab_cancel_glm.back.BIC)
+```
+
+ 
+```{r}
+AIC(cab_cancel_glm0)
+AIC(cab_cancel_glm.back.BIC)
+
+summary(cab_cancel_glm0)
+summary(cab_cancel_glm.back.BIC)
+```
+
+
+Let us quickly check the AUC value, Misclassification rate and FPR for this model.
+
+```{r}
+pred.cab_cancel_glm0_test <- predict(cab_cancel_glm.back.BIC, newdata = complete_set_test, type="response")
+pred <- prediction(pred.cab_cancel_glm0_test, complete_set_test$Car_Cancellation)
+perf <- performance(pred, "tpr", "fpr")
+plot(perf, colorize=TRUE)
+```
+
+
+```{r}
+unlist(slot(performance(pred, "auc"), "y.values"))
+```
+
+
+```{r}
+class.glm0.test <- (pred.cab_cancel_glm0_test>pcut)*1
+# get confusion matrix
+table(complete_set_test$Car_Cancellation, class.glm0.test, dnn = c("True", "Predicted"))
+```
+
+
+```{r}
+#Mis classification Rate
+(MR<- mean(complete_set_test$Car_Cancellation != class.glm0.test))
+```
+
+
+```{r}
+# False negative rate
+(FNR<- sum(complete_set_test$Car_Cancellation == 1 & class.glm0.test==0)/sum(complete_set_test$Car_Cancellation==1))
+```
+
+
+```{r}
+# False positive rate
+(FPR<- sum(complete_set_test$Car_Cancellation == 0 & class.glm0.test==1)/sum(complete_set_test$Car_Cancellation==0))
+```
+
+***
+
+***
+
+#### TREE Model Building
+
+##### Decision Trees
+
+```{r}
+library(rpart)
+library(rpart.plot)
+library(caret)
+
+# Generate classification tree
+default.ct <- rpart(Car_Cancellation ~ ., data = complete_set_train, method = "class")
+
+# plot tree
+prp(default.ct, type = 1, extra = 1, under = TRUE, split.font = 1, varlen = -10)
+```
+
+*In-sample model performance evaluation*
+```{r}
+# generate confusion matrix for training data
+default.ct.point.pred.train <- predict(default.ct,complete_set_train,type = "class")
+confusionMatrix(default.ct.point.pred.train, complete_set_train$Car_Cancellation)
+```
+
+```{r}
+# 1. calculate the TPR and FPR (= 1-TNR) for all possible thresholds. Use the class probability as predictor
+library(pROC)
+myRoc <- roc(response = droplevels(complete_set_train$Car_Cancellation), predictor = as.numeric(default.ct.point.pred.train))
+# table(droplevels(complete_set_train_strat$Car_Cancellation))
+myRoc
+```
+
+
+```{r}
+# 2. print TPR against FPR to obtain the roc curve
+plot(myRoc)
+```
+
+```{r}
+#Mis classification Rate
+(MR_Ct_train<- mean(complete_set_train$Car_Cancellation != default.ct.point.pred.train))
+
+# False negative rate
+(FNR_Ct_train<- sum(complete_set_train$Car_Cancellation == 1 & default.ct.point.pred.train==0)/sum(complete_set_train$Car_Cancellation==1))
+
+# False positive rate
+(FPR_Ct_train<- sum(complete_set_train$Car_Cancellation == 0 & default.ct.point.pred.train==1)/sum(complete_set_train$Car_Cancellation==0))
+
+cat("DT train - \nFPR - ", FPR_Ct_train, "\nFNR - ", FNR_Ct_train, "\nMR - ", MR_Ct_train)
+
+```
+
+
+*In-sample model performance evaluation*
+```{r}
+# generate confusion matrix for training data
+default.ct.point.pred.test <- predict(default.ct,complete_set_test,type = "class")
+confusionMatrix(default.ct.point.pred.test, complete_set_test$Car_Cancellation)
+
+```
+
+```{r}
+# 1. calculate the TPR and FPR (= 1-TNR) for all possible thresholds. Use the class probability as predictor
+library(pROC)
+myRoc <- roc(response = droplevels(complete_set_test$Car_Cancellation), predictor = as.numeric(default.ct.point.pred.test))
+# table(droplevels(complete_set_train_strat$Car_Cancellation))
+myRoc
+```
+
+
+```{r}
+# 2. print TPR against FPR to obtain the roc curve
+plot(myRoc)
+```
+
+
+```{r}
+#Mis classification Rate
+(MR_Ct_test <- mean(complete_set_test$Car_Cancellation != default.ct.point.pred.test))
+
+
+# False negative rate
+(FNR_Ct_test <- sum(complete_set_test$Car_Cancellation == 1 & default.ct.point.pred.test==0)/sum(complete_set_test$Car_Cancellation==1))
+
+# False positive rate
+(FPR_Ct_test <- sum(complete_set_test$Car_Cancellation == 0 & default.ct.point.pred.test==1)/sum(complete_set_test$Car_Cancellation==0))
+
+cat("DT train - \nFPR - ", FPR_Ct_test, "\nFNR - ", FNR_Ct_test, "\nMR - ", MR_Ct_test)
+```
+
+***
+
+***
+
+##### Prune the tree
+```{r}
+library(rpart)
+library(rpart.plot)
+
+car.largetree <- rpart(Car_Cancellation ~ ., data = complete_set_train, cp = 0.001)
+
+prp(car.largetree)
+
+plotcp(car.largetree)
+
+```
+
+```{r}
+prune(car.largetree, cp = 0.003)
+
+# Generate classification tree
+car.pruned <- rpart(Car_Cancellation ~ ., data = complete_set_train, cp = 0.006)
+
+# plot tree
+prp(car.pruned, type = 1, extra = 1)
+```
+
+*In-sample model performance evaluation*
+```{r}
+# generate confusion matrix for training data
+ct.pruned.pred.train <- predict(car.pruned,complete_set_train,type = "class")
+confusionMatrix(ct.pruned.pred.train, complete_set_train$Car_Cancellation)
+```
+
+```{r}
+# 1. calculate the TPR and FPR (= 1-TNR) for all possible thresholds. Use the class probability as predictor
+library(pROC)
+myRoc <- roc(response = droplevels(complete_set_train$Car_Cancellation), predictor = as.numeric(ct.pruned.pred.train))
+# table(droplevels(complete_set_train_strat$Car_Cancellation))
+myRoc
+```
+
+
+```{r}
+# 2. print TPR against FPR to obtain the roc curve
+plot(myRoc)
+```
+
+```{r}
+#Mis classification Rate
+(MR_Ct_pruned_train<- mean(complete_set_train$Car_Cancellation != ct.pruned.pred.train))
+
+# False negative rate
+(FNR_Ct_pruned_train<- sum(complete_set_train$Car_Cancellation == 1 & ct.pruned.pred.train==0)/sum(complete_set_train$Car_Cancellation==1))
+
+# False positive rate
+(FPR_Ct_pruned_train<- sum(complete_set_train$Car_Cancellation == 0 & ct.pruned.pred.train==1)/sum(complete_set_train$Car_Cancellation==0))
+
+cat("DT Pruned train - \nFPR - ", FPR_Ct_pruned_train, "\nFNR - ", FNR_Ct_pruned_train, "\nMR - ", MR_Ct_pruned_train)
+
+```
+
+
+*Out-of-sample model performance evaluation*
+```{r}
+# generate confusion matrix for training data
+ct.pruned.pred.test <- predict(car.pruned,complete_set_test,type = "class")
+confusionMatrix(ct.pruned.pred.test, complete_set_test$Car_Cancellation)
+
+```
+
+```{r}
+# 1. calculate the TPR and FPR (= 1-TNR) for all possible thresholds. Use the class probability as predictor
+library(pROC)
+myRoc <- roc(response = droplevels(complete_set_test$Car_Cancellation), predictor = as.numeric(ct.pruned.pred.test))
+# table(droplevels(complete_set_train_strat$Car_Cancellation))
+myRoc
+```
+
+
+```{r}
+# 2. print TPR against FPR to obtain the roc curve
+plot(myRoc)
+```
+
+
+```{r}
+#Mis classification Rate
+(MR_Ct_pruned_test <- mean(complete_set_test$Car_Cancellation != ct.pruned.pred.test))
+
+
+# False negative rate
+(FNR_Ct_pruned_test <- sum(complete_set_test$Car_Cancellation == 1 & ct.pruned.pred.test==0)/sum(complete_set_test$Car_Cancellation==1))
+
+# False positive rate
+(FPR_Ct_pruned_test <- sum(complete_set_test$Car_Cancellation == 0 & ct.pruned.pred.test==1)/sum(complete_set_test$Car_Cancellation==0))
+
+cat("CT pruned test - \nFPR - ", FPR_Ct_pruned_test, "\nFNR - ", FNR_Ct_pruned_test, "\nMR - ", MR_Ct_pruned_test)
+```
+
+
+***
+
+***
+
+##### Improvement: Boosted tree
+
+We were not satisfied with performance of our pruned tree, so we used a boosted tree for improvement.
+```{r}
+library(adabag)
+
+boost <- boosting(Car_Cancellation ~ ., data = complete_set_train)
+
+```
+
+*In-sample model performance evaluation*
+```{r}
+pred_train <- predict(boost, complete_set_train)
+
+confusionMatrix(as.factor(pred_train$class), complete_set_train$Car_Cancellation)
+```
+
+```{r}
+#Mis classification Rate
+(MR_boost_train <- mean(droplevels(complete_set_train$Car_Cancellation) != pred_train$class))
+
+# False negative rate
+(FNR_boost_train <- sum(complete_set_train$Car_Cancellation == 1 & pred_train$class==0)/sum(complete_set_train$Car_Cancellation==1))
+
+# False positive rate
+(FPR_boost_train <- sum(complete_set_train$Car_Cancellation == 0 & pred_train$class==1)/sum(complete_set_train$Car_Cancellation==0))
+
+cat("Boost train - \nFPR - ", FPR_boost_train, "\nFNR - ", FNR_boost_train, "\nMR - ", MR_boost_train)
+```
+
+ROC curve
+```{r}
+myRoc <- roc(response = droplevels(complete_set_train$Car_Cancellation), predictor = as.numeric(pred_train$class))
+# table(droplevels(complete_set_train_strat$Car_Cancellation))
+myRoc
+
+```
+
+
+*Out-of-sample model performance evaluation*
+```{r}
+pred_test <- predict(boost, complete_set_test)
+
+confusionMatrix(as.factor(pred_test$class), complete_set_test$Car_Cancellation)
+```
+
+
+```{r}
+#Mis classification Rate
+(MR_boost_test <- mean(droplevels(complete_set_test$Car_Cancellation) != pred_test$class))
+
+# False negative rate
+(FNR_boost_test<- sum(complete_set_test$Car_Cancellation == 1 & pred_test$class==0)/sum(complete_set_test$Car_Cancellation==1))
+
+# False positive rate
+(FPR_boost_test<- sum(complete_set_test$Car_Cancellation == 0 & pred_test$class==1)/sum(complete_set_test$Car_Cancellation==0))
+
+cat("Boost test - \nFPR - ", FPR_boost_test, "\nFNR - ", FNR_boost_test, "\nMR - ", MR_boost_test)
+```
+
+ROC Curve
+```{r}
+myRoc <- roc(response = droplevels(complete_set_test$Car_Cancellation), predictor = as.numeric(pred_test$class))
+# table(droplevels(complete_set_train_strat$Car_Cancellation))
+myRoc
+
+```
+
+***
+
+***
+
+##### Support Vector Machine (SVM)
+
+SVM is probably one of the best off-the-shelf classifiers for many of problems. It handles nonlinearity, is well regularized (avoids overfitting), have few parameters, and fast for large number of observations.
+
+```{r, message=FALSE}
+library(e1071)
+train_svm <- svm(Car_Cancellation ~., data = complete_set_train, cost = 1, gamma = 1/length(complete_set_train), probability = TRUE)
+```
+
+*In-sample model performance evaluation*
+```{r}
+prob_train_svm <- predict(train_svm, complete_set_train,probability = TRUE)
+prob_train_svm <- attr(prob_train_svm, 'probabilities')[,2] #This is needed because prob.svm gives a matrix
+pred_train_svm <- as.numeric((prob_train_svm >= 0.5))
+table(complete_set_train$Car_Cancellation, pred_train_svm, dnn = c("Obs", "Pred"))
+
+# False positive rate
+FPR_svm_train <- sum(complete_set_train$Car_Cancellation == 0 & pred_train_svm ==1 )/sum(complete_set_train$Car_Cancellation == 0)
+
+# False Negative Rate
+FNR_svm_train <- sum(complete_set_train$Car_Cancellation == 1 & pred_train_svm == 0)/sum(complete_set_train$Car_Cancellation == 1)
+
+# Misclassification Rate
+MR_svm_train <- mean(complete_set_train$Car_Cancellation != pred_train_svm)
+
+pred_train_roc <- prediction(prob_train_svm, complete_set_train$Car_Cancellation)
+perf_train_roc <- performance(pred_train_roc, "tpr", "fpr")
+
+cat("SVM train - \nFPR - ", FPR_svm_train, "\nFNR - ", FNR_svm_train, "\nMR - ", MR_svm_train, "\nAUC - ", unlist(slot(performance(pred_train_roc, "auc"), "y.values")))
+
+plot(perf_train_roc, colorize = TRUE)
+roc(complete_set_train_strat$Car_Cancellation, pred_train_svm, legacy.axes=TRUE, 
+          xlab="False Positive Rate", ylab="True Postive Rate",plot=TRUE, col="#377eb8", lwd=4, print.auc = TRUE)
+```
+
+
+*Out-of-sample model performance evaluation*
+```{r}
+prob_test_svm <- predict(train_svm, complete_set_test,probability = TRUE)
+prob_test_svm <- attr(prob_test_svm, 'probabilities')[,2] #This is needed because prob.svm gives a matrix
+pred_test_svm <- as.numeric((prob_test_svm >= 0.5))
+
+table(complete_set_test$Car_Cancellation, pred_test_svm, dnn = c("Obs", "Pred"))
+
+# False positive rate
+FPR_svm_test <- sum(complete_set_test$Car_Cancellation == 0 & pred_test_svm ==1 )/sum(complete_set_test$Car_Cancellation == 0)
+
+# False Negative Rate
+FNR_svm_test <- sum(complete_set_test$Car_Cancellation == 1 & pred_test_svm == 0)/sum(complete_set_test$Car_Cancellation == 1)
+
+# Misclassification Rate
+MR_svm_test <- mean(complete_set_test$Car_Cancellation != pred_test_svm)
+
+pred_test_roc <- prediction(prob_test_svm, complete_set_test$Car_Cancellation)
+perf_test_roc <- performance(pred_test_roc, "tpr", "fpr")
+
+cat("SVM test - \nFPR - ", FPR_svm_test, "\nFNR - ", FNR_svm_test, "\nMR - ", MR_svm_test, "\nAUC - ", unlist(slot(performance(pred_test_roc, "auc"), "y.values")))
+
+plot(perf_test_roc, colorize = TRUE)
+roc(complete_set_test$Car_Cancellation, pred_test_svm, legacy.axes=TRUE, 
+          xlab="False Positive Rate", ylab="True Postive Rate",plot=TRUE, col="#377eb8", lwd=4, print.auc = TRUE)
+```
+
+
+***
+
+***
+
+##### Neural Nets
+```{r}
+library(nnet)
+train_nnet <- nnet(as.factor(Car_Cancellation) ~., data=complete_set_train, size = 3, decay = 0.1, maxit=500)
+```
+
+```{r, fig.width=10, fig.height=10}
+library(NeuralNetTools)
+plotnet(train_nnet)
+```
+
+*In-sample model performance evaluation*
+```{r}
+prob_nnet_train <- predict(train_nnet, type='raw')
+pred_nnet_train <- (prob_nnet_train >= 0.5)*1
+table(complete_set_train$Car_Cancellation, pred_nnet_train, dnn=c("Observed","Predicted"))
+
+# False positive rate
+FPR_nnet_train <- sum(complete_set_train$Car_Cancellation == 0 & pred_nnet_train ==1 )/sum(complete_set_train$Car_Cancellation == 0)
+
+# False Negative Rate
+FNR_nnet_train <- sum(complete_set_train$Car_Cancellation == 1 & pred_nnet_train == 0)/sum(complete_set_train$Car_Cancellation == 1)
+# Misclassification Rate
+MR_nnet_train <- mean(complete_set_train$Car_Cancellation != pred_nnet_train)
+
+cat("NNET train - \nFPR - ", FPR_nnet_train, "\nFNR - ", FNR_nnet_train, "\nMR - ", MR_nnet_train)
+
+roc(complete_set_train$Car_Cancellation, pred_nnet_train, legacy.axes=TRUE, 
+          xlab="False Positive Rate", ylab="True Postive Rate",plot=TRUE, col="#377eb8", lwd=4, print.auc = TRUE)
+```
+
+
+*Out-of-sample model performance evaluation*
+```{r}
+prob_nnet_test <- predict(train_nnet, newdata = complete_set_test, type='raw')
+pred_nnet_test <- (prob_nnet_test >= 0.5)*1
+table(complete_set_test$Car_Cancellation, pred_nnet_test, dnn=c("Observed","Predicted"))
+
+# False positive rate
+FPR_nnet_test <- sum(complete_set_test$Car_Cancellation == 0 & pred_nnet_test ==1 )/sum(complete_set_test$Car_Cancellation == 0)
+# False Negative Rate
+FNR_nnet_test <- sum(complete_set_test$Car_Cancellation == 1 & pred_nnet_test == 0)/sum(complete_set_test$Car_Cancellation == 1)
+# Misclassification Rate
+MR_nnet_test <- mean(complete_set_test$Car_Cancellation != pred_nnet_test)
+
+cat("NNET test - \nFPR - ", FPR_nnet_test, "\nFNR - ", FNR_nnet_test, "\nMR - ", MR_nnet_test)
+```
+
+
+```{r}
+roc(complete_set_test$Car_Cancellation, pred_nnet_test, legacy.axes=TRUE, 
+          xlab="False Positive Rate", ylab="True Postive Rate",plot=TRUE, col="#377eb8", lwd=4, print.auc = TRUE)
+```
+
+***
+
+***
+
