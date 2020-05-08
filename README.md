@@ -1,4 +1,4 @@
-# Predict Cab Booking Cancellationss
+# Predict Cab Booking Cancellations
 A model is built in R to predict the cancellation of the cab due to unavailability.
 
 ## Abstract
