@@ -1,5 +1,5 @@
 # Predict Cab Booking Cancellations
-Models are built in R to predict the cancellation of the cab due to unavailability.
+Various classification models are built in R to predict the cancellation of the cab due to unavailability.
 
 ## Abstract
 
